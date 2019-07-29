@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 
-from utils import response_from_bytes, MyHTMLParser
-
 from argparse import ArgumentParser, FileType
 from re import search as re_search
 from pathlib import Path
@@ -13,22 +11,49 @@ from contextlib import closing
 import xml.etree.ElementTree
 from base64 import b64decode
 from hashlib import sha256
-from urllib.parse import urljoin
-from urllib.parse import urlparse
-import asyncio
+from urllib.parse import urljoin, urlparse, ParseResult as UrlParseResult
+from asyncio import run as asyncio_run, gather as asyncio_gather, ensure_future, TimeoutError
 from html.parser import HTMLParser
 
-from aiohttp import ClientSession
+from aiohttp import ClientSession, ClientTimeout
 import esprima
+from esprima.nodes import Node as EsprimaNode
+
+from utils import response_from_bytes, MyHTMLParser
 
 
-# node_types = {'BinaryExpression', 'VariableDeclarator', 'CallExpression', 'Property'}
-node_types = {'BinaryExpression', 'VariableDeclarator', 'Property'}
+CONTEXT_NODE_TYPES = {
+    'AssignmentExpression',
+    'VariableDeclarator',
+    'Property',
+    # 'BinaryExpression',
+    'CallExpression',
+    'NewExpression',
+    'ReturnStatement',
+    'ThrowStatement',
+    'ExpressionStatement',
+    'IfStatement'
+}
+
+JAVASCRIPT_CONTENT_TYPES = {
+    'text/javascript',
+    'text/javascript+module',
+    'application/x-javascript',
+    'application/javascript',
+    'application/javascript+module',
+    'text/ecmascript',
+    'application/ecmascript',
+    'text/jscript'
+}
 
 
-async def fetch(url, session, **kwargs):
-    async with session.request(url=url, **kwargs) as response:
-        return await response.read()
+async def fetch(url, session, **kwargs) -> bytes:
+    try:
+        async with session.request(url=url, **kwargs) as response:
+            return await response.read()
+    except TimeoutError as e:
+        print(f'{url}: timeout error', file=stderr)
+        return b''
 
 
 class MyHTMLParser_two(HTMLParser):
@@ -41,6 +66,10 @@ class MyHTMLParser_two(HTMLParser):
         self.html_url = html_url
         self._handle_next_data = False
 
+    @property
+    def parsed_html_url(self) -> UrlParseResult:
+        return urlparse(self.html_url)
+
     def handle_starttag(self, tag_name, attribute_value_pairs):
         if tag_name != 'script':
             return
@@ -48,15 +77,22 @@ class MyHTMLParser_two(HTMLParser):
         attribute_to_value = {attribute: value for attribute, value in attribute_value_pairs}
 
         if 'src' not in attribute_to_value:
-            self._handle_next_data = True
+            script_content_type: Optional[str] = attribute_to_value.get('type')
+            self._handle_next_data = script_content_type is None \
+                or script_content_type.split(';')[0].lower().rstrip() in JAVASCRIPT_CONTENT_TYPES
+
             return
 
-        src = attribute_to_value['src'].replace("\\'", '').replace('\\"', '')
-        retrieve_url = src if bool(urlparse(src).netloc) else urljoin(self.html_url, src)
+        src: str = attribute_to_value['src'].replace("\\'", '').replace('\\"', '')
+        # # TODO: Control with flag.
+        # if '/wp-content' in src or 'wp-includes' in src:
+        #     return
 
-        if retrieve_url in MyHTMLParser_two.retrieved_urls:
-            return
-        MyHTMLParser_two.retrieved_urls.add(retrieve_url)
+        resolved_src_url: str = src if bool(urlparse(src).netloc) else urljoin(self.html_url, src)
+        if urlparse(resolved_src_url).scheme == '':
+            resolved_src_url: str = f'{self.parsed_html_url.scheme}:{resolved_src_url}'
+
+        MyHTMLParser_two.retrieved_urls.add(resolved_src_url)
 
     def handle_data(self, data):
         if not self._handle_next_data:
@@ -66,12 +102,25 @@ class MyHTMLParser_two(HTMLParser):
 
         if data in MyHTMLParser_two.body_to_body_id:
             return
-        MyHTMLParser_two.body_to_body_id[bytes(data, 'utf-8').decode('unicode_escape')] = f'{self.html_url}_{body_hash}'
+        MyHTMLParser_two.body_to_body_id[bytes(data, 'utf-8').decode('unicode_escape')] = f'{self.html_url} -- {body_hash}'
 
         self._handle_next_data = False
 
 
-def find_endpoint_candidates(content: str) -> List[str]:
+def is_url_string_node(node: EsprimaNode) -> bool:
+
+    if node.type == 'Literal':
+        value = node.value
+    elif node.type == 'TemplateElement':
+        # TODO: Not sure about difference between the `cooked` and `raw` fields.
+        value = node.value.cooked
+    else:
+        return False
+
+    return isinstance(value, str) and re_search(r'(?<!application)(?<!text)(?<!<)\s*/\s*(?!>)', value)
+
+
+def find_endpoint_candidates(content: str) -> Set[str]:
     """Find endpoint candidates in the contents of a file."""
 
     node_to_metadata = dict()
@@ -81,42 +130,49 @@ def find_endpoint_candidates(content: str) -> List[str]:
 
     program_tree = esprima.parseScript(content, delegate=delegate)
 
-    node_stack = list()
-    interesting_nodes = set()
+    context_node_stack: List[EsprimaNode] = []
+    url_context_strings: Set[str] = set()
 
     def traverse(node):
 
-        if not isinstance(node, esprima.nodes.Node):
+        if not isinstance(node, EsprimaNode):
             return
 
-        node_stack.append(node)
+        is_context_node = node.type in CONTEXT_NODE_TYPES
 
-        if node.type == 'Literal' and isinstance(node.value, str) and re_search(r'(?<!application)(?<!text)(?<!<)\s*/\s*(?!>)', node.value):
-            n = next((node for node in node_stack if node.type in node_types), None)
-            if not n:
-                n = next(node for node in reversed(node_stack) if node.type == 'CallExpression')
+        if is_context_node:
+            context_node_stack.append(node)
 
-            interesting_nodes.add(n)
-            node_stack.pop()
-            return
+        if is_url_string_node(node):
+            context_node: EsprimaNode = context_node_stack[-1]
+            if context_node.type == 'IfStatement':
+                context_node: EsprimaNode = context_node.test
 
-        for node_value in node.__dict__.values():
-            if isinstance(node_value, list):
-                for element in node_value:
-                    traverse(element)
-            else:
-                traverse(node_value)
+            context_node_metadata = node_to_metadata[context_node]
+            string_literal_metadata = node_to_metadata[node]
 
-        node_stack.pop()
+            url_context_strings.add(
+            content[context_node_metadata.start.offset:string_literal_metadata.start.offset]
+                + '\x1b[31m'
+                + content[string_literal_metadata.start.offset:string_literal_metadata.end.offset]
+                + '\x1b[0m'
+                + content[string_literal_metadata.end.offset:context_node_metadata.end.offset]
+            )
+        else:
+            for node_value in node.__dict__.values():
+                if isinstance(node_value, list):
+                    for element in node_value:
+                        traverse(element)
+                else:
+                    traverse(node_value)
+
+        if is_context_node:
+            context_node_stack.pop()
 
     for base_node in program_tree.body:
         traverse(base_node)
 
-    strings = list()
-    for interesting_node in interesting_nodes:
-        metadata = node_to_metadata[interesting_node]
-        strings.append(content[metadata.start.offset:metadata.end.offset])
-    return strings
+    return url_context_strings
 
 
 async def main(
@@ -126,7 +182,7 @@ async def main(
     html_urls: Optional[List[str]] = None,
     recurse: bool = False,
     cookie_str: Optional[str] = None
-) -> Dict[str, List[str]]:
+) -> Dict[str, Set[str]]:
 
     input_files = input_files or []
     burp_files = burp_files or []
@@ -137,8 +193,14 @@ async def main(
         for cookie_assignment in cookie_str.strip().split('; ')
     } if cookie_str else {}
 
+    request_options = dict(
+        method='GET',
+        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/74.0.3729.169 Safari/537.36'},
+        verify_ssl=False,
+        timeout=ClientTimeout(total=4)
+    )
 
-    filename_to_endpoint_candidates: Dict[str, List[str]] = dict()
+    filename_to_endpoint_candidates: Dict[str, Set[str]] = {}
 
     # Process ordinary files and directories.
 
@@ -162,10 +224,10 @@ async def main(
             if not str(response.status).startswith('2'):
                 continue
 
-            content_type = response.headers['Content-Type'].split(';')[0]
+            content_type = response.headers['Content-Type'].split(';')[0].lower().rstrip()
             url = item.find('url').text
 
-            if content_type in {'application/javascript', 'text/javascript', 'application/x-javascript'}:
+            if content_type in JAVASCRIPT_CONTENT_TYPES:
                 filename_to_endpoint_candidates[url] = find_endpoint_candidates(str(response.data))
 
             elif content_type == 'text/html':
@@ -178,20 +240,21 @@ async def main(
 
     if html_urls:
         async with ClientSession() as session:
-            response_data_list = await asyncio.gather(
-                *(asyncio.ensure_future(fetch(html_url, session, method='get')) for html_url in html_urls)
+            response_data_list = await asyncio_gather(
+                *(ensure_future(fetch(html_url, session, **request_options)) for html_url in html_urls)
             )
 
             for html_url, response_data in zip(html_urls, response_data_list):
                 html_parser = MyHTMLParser_two(html_url)
                 html_parser.feed(str(response_data))
 
-            response_data_list = await asyncio.gather(
-                *(asyncio.ensure_future(fetch(url, session, method='get')) for url in MyHTMLParser_two.retrieved_urls)
+            response_data_list = await asyncio_gather(
+                *(ensure_future(fetch(url, session, **request_options)) for url in MyHTMLParser_two.retrieved_urls)
             )
 
             for url, response_data in zip(MyHTMLParser_two.retrieved_urls, response_data_list):
                 filename_to_endpoint_candidates[url] = find_endpoint_candidates(response_data.decode('utf-8'))
+
             for script_body, script_body_id in MyHTMLParser_two.body_to_body_id.items():
                 filename_to_endpoint_candidates[script_body_id] = find_endpoint_candidates(script_body)
 
@@ -199,8 +262,8 @@ async def main(
 
     if urls:
         async with ClientSession() as session:
-            response_data_list = await asyncio.gather(
-                *(asyncio.ensure_future(fetch(url, session, method='get')) for url in urls)
+            response_data_list = await asyncio_gather(
+                *(ensure_future(fetch(url, session, **request_options)) for url in urls)
             )
             for url, response_data in zip(urls, response_data_list):
                 filename_to_endpoint_candidates[url] = find_endpoint_candidates(response_data.decode('utf-8'))
@@ -311,7 +374,7 @@ if __name__ == '__main__':
         read_from_stdin = True
 
     try:
-        filename_to_endpoint_candidates = asyncio.run(
+        filename_to_endpoint_candidates = asyncio_run(
             main(
                 args.input_files,
                 args.burp_files,
@@ -344,7 +407,7 @@ if __name__ == '__main__':
                             # Produce an underlined title.
                             output_accumulator.write(filename + '\n' + '=' * len(filename) + '\n')
                             # Produce the lines with the endpoint candidates.
-                            output_accumulator.write('\n'.join(endpoint_candidates) + '\n\n')
+                            output_accumulator.write('• ' + '\n• '.join(endpoint_candidates) + '\n\n')
 
                     # Write the accumulated string to the output, without the last newline character.
                     args.output_destination.write(output_accumulator.getvalue()[:-1])
