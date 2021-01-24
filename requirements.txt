@@ -1,0 +1,6 @@
+esprima
+httpx
+urllib3
+-e git+ssh://git@github.com/vphpersson/pyutils.git#egg=pyutils
+-e git+ssh://git@github.com/vphpersson/url_downloader.git#egg=url_downloader
+-e git+ssh://git@github.com/vphpersson/terminal_utils.git#egg=terminal_utils
