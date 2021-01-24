@@ -33,7 +33,7 @@ optional arguments:
 
 ### Example
 
-#### Single JavaScript file, without context
+#### Single JavaScript URL, without context
 
 ```shell
 $ ./link_finder.py -u 'https://online.auktionsverket.se/script/online180115_sv.js'
@@ -54,13 +54,13 @@ https://online.auktionsverket.se/script/online180115_sv.js
 #### Single JavaScript file, with context
 
 ```shell
-$ ./link_finder.py -u 'https://online.auktionsverket.se/script/online180115_sv.js' --show-context
+$ ./link_finder.py -i /tmp/online180115_sv_fixed.js --show-context
 ```
 
 Output:
 ```
-https://online.auktionsverket.se/script/online180115_sv.js
-==========================================================
+/tmp/online180115_sv_fixed.js
+=============================
 window.location.assign("/prg/sokutokad.asp?kat="+document.formSok4.sokkategori.value+"&sok="+ escape(document.formSok2.sok.value)+"&typ="+document.formSok3.soktyp.value)
 window.location.assign("/prg/sokrss.asp?kat="+document.formSok4.sokkategori.value+"&sok="+escape(document.formSok2.sok.value))
 realobj.open("POST", "/prg/sprakinst.asp?sp="+sp,true)
@@ -71,7 +71,9 @@ realobj.open("POST", "/prg/sokspara.asp?kat="+document.formSok4.sokkategori.valu
 
 (When output in a shell, the matches are highlighted.)
 
-#### Single HTML file, with context, with external scripts (truncated)
+Beware of encoding issues! The program expects `utf-8`.
+
+#### Single HTML URL, with context, with external scripts (truncated)
 
 ```shell
 $ ./link_finder.py -u 'https://online.auktionsverket.se' --show-context  --retrieve-external-scripts
