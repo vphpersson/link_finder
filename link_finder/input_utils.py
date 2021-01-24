@@ -47,10 +47,9 @@ class _ScriptHTMLParser(HTMLParser):
         if src := attribute_to_value.get('src'):
             self.script_sources.add(src)
         else:
-            script_content_type: Optional[str] = attribute_to_value.get('type')
-            content_type: str = script_content_type.split(';')[0].lower().rstrip()
+            script_content_type: Optional[str] = attribute_to_value.get('type', '').split(';')[0].lower().rstrip()
 
-            self._parse_next = script_content_type is None or content_type in JAVASCRIPT_CONTENT_TYPES
+            self._parse_next = not script_content_type or script_content_type in JAVASCRIPT_CONTENT_TYPES
 
     def handle_data(self, data):
         if self._parse_next:
