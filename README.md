@@ -4,7 +4,7 @@ Obtain strings from JavaScript code that look like paths.
 
 The strings are extracted by use of a _JavaScript parser_ ([Esprima](https://esprima.org/)) for better reliability than an approach solely relying on regular expressions.
 
-Currently, the input can be either file paths or URLs to JavaScript files or HTML files. In the case of HTML files, the contents of `<scripts>` elements are extracted. Externally referenced script files can also be parsed by providing a flag.
+Currently, the input can be either file paths or URLs to JavaScript files or HTML files. In the case of HTML files, the contents of `<script>` elements are extracted. Externally referenced script files can also be parsed by providing a flag.
 
 
 ## Usage
@@ -31,7 +31,7 @@ optional arguments:
   -q, --quiet           Do not output warning messages or error messages.
 ```
 
-### Example
+### Examples
 
 #### Single JavaScript URL, without context
 
