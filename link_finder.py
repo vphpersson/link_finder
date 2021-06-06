@@ -9,7 +9,7 @@ from json import dumps as json_dumps
 
 from pyutils.argparse.typed_argument_parser import TypedArgumentParser
 from pyutils.my_string import underline
-from url_downloader import download_urls
+from pyutils.asyncio import limited_gather
 from httpx import AsyncClient as HttpxAsyncClient, Response, HTTPStatusError
 
 from link_finder.input_utils import HTMLScriptParseResult, html_content_to_parse_result
@@ -56,7 +56,7 @@ async def collect_endpoint_candidates(
     external_resources_urls: set[str] = set()
     parse_html = True
 
-    def url_response_callback(url: str, response_task: Task) -> None:
+    def url_response_callback(response_task: Task, url: str) -> None:
 
         try:
             response: Response = response_task.result()
@@ -95,10 +95,20 @@ async def collect_endpoint_candidates(
             )
 
     if urls:
-        await download_urls(http_client=http_client, urls=list(urls), response_callback=url_response_callback)
+        await limited_gather(
+            iteration_coroutine=http_client.get,
+            iterable=list(urls),
+            result_callback=url_response_callback,
+        )
+        # NOTE: Used in the callback.
         parse_html = False
+
     if retrieve_external_scripts and external_resources_urls:
-        await download_urls(http_client=http_client, urls=external_resources_urls, response_callback=url_response_callback)
+        await limited_gather(
+            iteration_coroutine=http_client.get,
+            iterable=external_resources_urls,
+            result_callback=url_response_callback
+        )
 
     return path_to_endpoint_candidate_matches
 
