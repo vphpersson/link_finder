@@ -4,8 +4,10 @@ from re import search as re_search
 
 from esprima import parseScript as esprima_parse_script
 from esprima.nodes import Node as EsprimaNode
+from esprima import Error as EsprimaError
 
 LOG = getLogger(__name__)
+ENDPOINT_CANDIDATE_PATTERN = r'(?<!application)(?<!text)(?<!<)\s*/\s*(?!>)'
 
 
 @dataclass
@@ -38,7 +40,7 @@ def is_url_string_node(node: EsprimaNode) -> bool:
     else:
         return False
 
-    return isinstance(value, str) and re_search(r'(?<!application)(?<!text)(?<!<)\s*/\s*(?!>)', value)
+    return isinstance(value, str) and re_search(pattern=ENDPOINT_CANDIDATE_PATTERN, string=value)
 
 
 def find_endpoint_candidates(content: str, color_context: bool = True) -> list[EndpointCandidateMatch]:
@@ -49,7 +51,7 @@ def find_endpoint_candidates(content: str, color_context: bool = True) -> list[E
     def delegate(node, metadata):
         node_to_metadata[node] = metadata
 
-    program_tree = esprima_parse_script(code=content, delegate=delegate)
+    program_tree = esprima_parse_script(code=content, options=dict(comment=True), delegate=delegate)
 
     context_node_stack: list[EsprimaNode] = []
     matches: list[EndpointCandidateMatch] = []
@@ -99,6 +101,27 @@ def find_endpoint_candidates(content: str, color_context: bool = True) -> list[E
             context_node_stack.pop()
 
     for base_node in program_tree.body:
-        traverse(base_node)
+        traverse(node=base_node)
+
+    for comment in program_tree.comments:
+
+        if comment.type == 'Line':
+            comment_lines = [comment.value]
+        elif comment.type == 'Block':
+            comment_lines = comment.value.splitlines()
+        else:
+            raise ValueError('Bad comment type.')
+
+        for comment_line in comment_lines:
+            try:
+                # Attempt to parse the comment as JavaScript code, extracting the string value and context as usual.
+                parse_script_options = dict(code=comment_line, options=dict(tolerant=True), delegate=delegate)
+                for base_node in esprima_parse_script(**parse_script_options).body:
+                    content = comment_line
+                    traverse(node=base_node)
+            except EsprimaError:
+                # In case the comment cannot be parsed as JavaScript code, perform a regex check (entailing no context).
+                if re_search(pattern=ENDPOINT_CANDIDATE_PATTERN, string=comment_line):
+                    matches.append(EndpointCandidateMatch(value=comment_line.lstrip(), context=comment_line))
 
     return matches
